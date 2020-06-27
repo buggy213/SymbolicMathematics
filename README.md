@@ -2,6 +2,8 @@
 
 PyTorch original implementation of [Deep Learning for Symbolic Mathematics](https://arxiv.org/abs/1912.01412) (ICLR 2020).
 
+**This is a modified version of the Deep Learning for Symbolic Mathematics. The purpose of this modification is to attempt to incorporate curriculum learning, function simplification, Liouvillian functions, multiple parameters, embedding, and to document code while doing this.**
+
 This repository contains code for:
 - **Data generation**
     - Functions F with their derivatives f
