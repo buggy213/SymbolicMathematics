@@ -128,3 +128,6 @@ dmypy.json
 /data
 /dumped
 .vscode
+
+# PyCharm
+.idea

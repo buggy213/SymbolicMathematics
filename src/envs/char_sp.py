@@ -29,7 +29,7 @@ from ..utils import timeout, TimeoutError
 from .sympy_utils import remove_root_constant_terms, reduce_coefficients, reindex_coefficients
 from .sympy_utils import extract_non_constant_subtree, simplify_const_with_coeff, simplify_equa_diff, clean_degree2_solution
 from .sympy_utils import remove_mul_const, has_inf_nan, has_I, simplify
-
+from multiprocessing import Value
 
 CLEAR_SYMPY_CACHE_FREQ = 10000
 
@@ -233,6 +233,8 @@ class CharSPEnvironment(object):
         'h': 3,
     }
 
+    total_counts = 0
+
     def __init__(self, params):
 
         self.max_int = params.max_int
@@ -246,6 +248,7 @@ class CharSPEnvironment(object):
         self.n_coefficients = params.n_coefficients
         self.max_len = params.max_len
         self.clean_prefix_expr = params.clean_prefix_expr
+        self.curriculum_ramp = params.curriculum_ramp
         assert self.max_int >= 1
         assert abs(self.int_base) >= 2
         assert self.precision >= 2
@@ -859,7 +862,7 @@ class CharSPEnvironment(object):
         return x, y
 
     @timeout(5)
-    def gen_prim_bwd(self, rng, predict_primitive):
+    def gen_prim_bwd(self, rng, predict_primitive, equations_generated):
         """
         Generate pairs of (function, derivative) or (function, primitive).
         Start by generating a random function f, and use SymPy to compute f'.
@@ -868,7 +871,12 @@ class CharSPEnvironment(object):
         if rng.randint(40) == 0:
             nb_ops = rng.randint(0, 4)
         else:
-            nb_ops = rng.randint(4, self.max_ops + 1)
+            if self.curriculum_ramp > equations_generated:
+                # Linear ramp (could try changing this later
+                a = (equations_generated / self.curriculum_ramp) * 0.99 + 0.01
+                nb_ops = round(rng.beta(a, 1) * self.max_ops + 1)
+            else:
+                nb_ops = rng.randint(4, self.max_ops + 1)
 
         try:
             # generate an expression and rewrite it,
@@ -1317,20 +1325,23 @@ class CharSPEnvironment(object):
                             help="Number of coefficients in expressions (between 0 and 10)")
         parser.add_argument("--clean_prefix_expr", type=bool_flag, default=True,
                             help="Clean prefix expressions (f x -> Y, derivative f x x -> Y')")
+        parser.add_argument("--curriculum_ramp", type=int, default=100000,
+                            help="Number of equations that don't have a uniformly distributed length")
 
     def create_train_iterator(self, task, params, data_path):
         """
         Create a dataset for this environment.
         """
         logger.info(f"Creating train iterator for {task} ...")
-
+        counter = Value('i', 0)
         dataset = EnvDataset(
             self,
             task,
             train=True,
             rng=None,
             params=params,
-            path=(None if data_path is None else data_path[task][0])
+            path=(None if data_path is None else data_path[task][0]),
+            shared_counter=counter
         )
         return DataLoader(
             dataset,
@@ -1347,14 +1358,15 @@ class CharSPEnvironment(object):
         """
         assert data_type in ['valid', 'test']
         logger.info(f"Creating {data_type} iterator for {task} ...")
-
+        counter = Value('i', 0)
         dataset = EnvDataset(
             self,
             task,
             train=False,
             rng=np.random.RandomState(0),
             params=params,
-            path=(None if data_path is None else data_path[task][1 if data_type == 'valid' else 2])
+            path=(None if data_path is None else data_path[task][1 if data_type == 'valid' else 2]),
+            shared_counter=counter
         )
         return DataLoader(
             dataset,
@@ -1364,11 +1376,9 @@ class CharSPEnvironment(object):
             shuffle=False,
             collate_fn=dataset.collate_fn
         )
-
-
 class EnvDataset(Dataset):
 
-    def __init__(self, env, task, train, rng, params, path):
+    def __init__(self, env, task, train, rng, params, path, shared_counter):
         super(EnvDataset).__init__()
         self.env = env
         self.rng = rng
@@ -1379,6 +1389,7 @@ class EnvDataset(Dataset):
         self.path = path
         self.global_rank = params.global_rank
         self.count = 0
+        self.shared_counter = shared_counter
         assert (train is True) == (rng is None)
         assert task in CharSPEnvironment.TRAINING_TASKS
 
@@ -1488,7 +1499,7 @@ class EnvDataset(Dataset):
                 if self.task == 'prim_fwd':
                     xy = self.env.gen_prim_fwd(self.rng)
                 elif self.task == 'prim_bwd':
-                    xy = self.env.gen_prim_bwd(self.rng, predict_primitive=True)
+                    xy = self.env.gen_prim_bwd(self.rng, predict_primitive=True, equations_generated=self.shared_counter.value)
                 elif self.task == 'prim_ibp':
                     xy = self.env.gen_prim_ibp(self.rng)
                 elif self.task == 'derivative':
@@ -1509,6 +1520,8 @@ class EnvDataset(Dataset):
                 logger.error("An unknown exception of type {0} occurred for worker {4} in line {1} for expression \"{2}\". Arguments:{3!r}.".format(type(e).__name__, sys.exc_info()[-1].tb_lineno, 'F', e.args, self.get_worker_id()))
                 continue
         self.count += 1
+        with self.shared_counter.get_lock():
+            self.shared_counter.value += 1
 
         # clear SymPy cache periodically
         if CLEAR_SYMPY_CACHE_FREQ > 0 and self.count % CLEAR_SYMPY_CACHE_FREQ == 0:
