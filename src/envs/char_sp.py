@@ -249,6 +249,7 @@ class CharSPEnvironment(object):
         self.max_len = params.max_len
         self.clean_prefix_expr = params.clean_prefix_expr
         self.curriculum_ramp = params.curriculum_ramp
+        self.use_curriculum_learning = params.use_curriculum_learning
         assert self.max_int >= 1
         assert abs(self.int_base) >= 2
         assert self.precision >= 2
@@ -777,7 +778,7 @@ class CharSPEnvironment(object):
         return expr
 
     @timeout(3)
-    def gen_prim_fwd(self, rng):
+    def gen_prim_fwd(self, rng, equations_generated):
         """
         Generate pairs of (function, primitive).
         Start by generating a random function f, and use SymPy to compute F.
@@ -786,7 +787,12 @@ class CharSPEnvironment(object):
         if rng.randint(40) == 0:
             nb_ops = rng.randint(0, 3)
         else:
-            nb_ops = rng.randint(3, self.max_ops + 1)
+            if self.curriculum_ramp > equations_generated and self.use_curriculum_learning:
+                # Linear ramp (could try changing this later
+                a = (equations_generated / self.curriculum_ramp) * 0.99 + 0.01
+                nb_ops = round(rng.beta(a, 1) * self.max_ops + 1)
+            else:
+                nb_ops = rng.randint(4, self.max_ops + 1)
 
         if not hasattr(self, 'prim_stats'):
             self.prim_stats = np.zeros(10, dtype=np.int64)
@@ -871,7 +877,7 @@ class CharSPEnvironment(object):
         if rng.randint(40) == 0:
             nb_ops = rng.randint(0, 4)
         else:
-            if self.curriculum_ramp > equations_generated:
+            if self.curriculum_ramp > equations_generated and self.use_curriculum_learning:
                 # Linear ramp (could try changing this later
                 a = (equations_generated / self.curriculum_ramp) * 0.99 + 0.01
                 nb_ops = round(rng.beta(a, 1) * self.max_ops + 1)
@@ -941,12 +947,12 @@ class CharSPEnvironment(object):
     PRIM_COUNT = [0, 0]
 
     @timeout(8)
-    def gen_prim_ibp(self, rng):
+    def gen_prim_ibp(self, rng, equations_generated):
         """
         Generate pairs of (function, primitive).
         Start by generating random functions F and G, and use the fact that:
-            (FG)(x) = (FG)(0) + int(F*g, x=0..x) + int(g*G, x=0..x)
-        where f = F' ang g = G'.
+            (FG)(x) = (FG)(0) + int(F*g, x=0..x) + int(f*G, x=0..x)
+        where f = F' and g = G'.
         """
         def update_cache(f, F):
             if x not in f.free_symbols:
@@ -968,7 +974,14 @@ class CharSPEnvironment(object):
         if rng.randint(40) == 0:
             nb_ops_F = rng.randint(0, 4)
         else:
-            nb_ops_F = rng.randint(4, self.max_ops + 1)
+            if self.curriculum_ramp > equations_generated:
+                # Linear ramp (could try changing this later
+                a = (equations_generated / self.curriculum_ramp) * 0.99 + 0.01
+                nb_ops_F = round(rng.beta(a, 1) * self.max_ops + 1)
+            else:
+                nb_ops_F = rng.randint(4, self.max_ops + 1)
+
+        # Should we also modify this?
         nb_ops_G = rng.randint(1, self.max_ops_G + 1)
 
         try:
@@ -1325,6 +1338,8 @@ class CharSPEnvironment(object):
                             help="Number of coefficients in expressions (between 0 and 10)")
         parser.add_argument("--clean_prefix_expr", type=bool_flag, default=True,
                             help="Clean prefix expressions (f x -> Y, derivative f x x -> Y')")
+        parser.add_argument("--use_curriculum_learning", type=bool, default=False,
+                            help="Use curriculum learning (i.e have the model first train on shorter expressions)")
         parser.add_argument("--curriculum_ramp", type=int, default=100000,
                             help="Number of equations that don't have a uniformly distributed length")
 
@@ -1497,13 +1512,13 @@ class EnvDataset(Dataset):
 
             try:
                 if self.task == 'prim_fwd':
-                    xy = self.env.gen_prim_fwd(self.rng)
+                    xy = self.env.gen_prim_fwd(self.rng, equations_generated=self.shared_counter.value)
                 elif self.task == 'prim_bwd':
                     xy = self.env.gen_prim_bwd(self.rng, predict_primitive=True, equations_generated=self.shared_counter.value)
                 elif self.task == 'prim_ibp':
                     xy = self.env.gen_prim_ibp(self.rng)
                 elif self.task == 'derivative':
-                    xy = self.env.gen_prim_bwd(self.rng, predict_primitive=False)
+                    xy = self.env.gen_prim_bwd(self.rng, predict_primitive=False, equations_generated=self.shared_counter.value)
                 elif self.task == 'ode1':
                     xy = self.env.gen_ode1(self.rng)
                 elif self.task == 'ode2':
