@@ -124,7 +124,10 @@ count1|input1_prefix    output1_prefix
 count2|input2_prefix    output2_prefix
 ...
 ```
-Where the input and output are separated by a tab, and equations are sorted by counts. This is under this format that data has to be given to the model. The number of `counts` is not used by the model, but was not removed in case of potential curriculum learning. The last part consists in simply splitting the dataset into training / validation / test sets. This can be done with the `split_data.py` script:
+
+The value class `shared_counter` was introduced by buggy213 in `src/envs/char_sp.py` as apart of an effort to incorporate curriculum learning. This value class was used in order to parameterize the beta distribution; the beta distribution was used because of its tendency (see https://towardsdatascience.com/beta-distribution-intuition-examples-and-derivation-cf00f4db57af for an explanation and https://www.desmos.com/calculator/kx83qio7yl for a visual) to normalize for sufficiently large values. We utilized this method for all generators.
+
+This can be done with the `split_data.py` script:
 
 ```bash
 # create a valid and a test set of 10k equations
